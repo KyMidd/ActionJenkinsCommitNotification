@@ -1,0 +1,155 @@
+name: 'Jenkins Commit Notification'
+description: 'I am used to tell Jenkins a commit was made'
+inputs:
+  jenkins-server:  # URL of the jenkins server
+    description: 'URL of the Jenkins server'
+    required: true
+  jenkins-username: # user name for accessing jenkins
+    description: 'User name for accessing Jenkins. Store this in a secret for security'
+    required: true
+  jenkins-api-token: # personal Access token for accessing Jenkins
+    description: 'API token for accessing Jenkins. Store this in a secret for security'
+    required: true
+  verbose: # true/false - turns on verbose logging
+    description: 'true/false - turns on verbose logging'
+    required: false
+    default: 'false'
+  
+runs:
+  using: "composite"
+  steps:
+    - id: jenkins-commit-notification
+      run: |
+        
+        ###
+        ### Define parameters
+        ###
+        urlOfJenkinsServer="${{ inputs.jenkins-server }}"
+        pollTime=${{ inputs.poll-time }}
+        verbose=${{ inputs.verbose }}
+        userName=${{ inputs.jenkins-username }}
+        api_token=${{ inputs.jenkins-api-token }}
+
+
+        ###
+        ### Define functions
+        ###
+        sendCommitNotification() {
+          # Map named variables to local vars
+          for ARGUMENT in "$@"; do
+            KEY=$(echo $ARGUMENT | cut -f1 -d=)
+
+            KEY_LENGTH=${#KEY}
+            VALUE="${ARGUMENT:$KEY_LENGTH+1}"
+
+            export "$KEY"="$VALUE"
+          done
+
+          ### Construct clone URL for unmodified casing
+          repo_clone_url="git@github.com:${GITHUB_REPOSITORY}.git"
+
+          ### Print what's happening
+          echo "--------------------------------------"
+          if [[ $LOWERCASE == true ]]; then
+            echo "Sending lowercase commit notification" "$repo_clone_url"
+          else
+            echo "Sending commit notification" "$repo_clone_url"
+          fi
+
+          ### Send commit notification
+          COMMITNOTIFICATION=$(curl -I -s -X POST -u "$userName:$api_token" "${urlOfJenkinsServer}/git/notifyCommit?url=${repo_clone_url}")
+
+          ### Debug
+          if [[ $verbose == true ]]; then
+            echo "verbose: Results of commit notification:"
+            echo "$COMMITNOTIFICATION"
+            echo "--------------------------------------"
+          fi
+
+          ### Check if commit notification was successful
+          if [[ "$COMMITNOTIFICATION" == *"200 OK"* ]]; then
+            echo "Commit notifications delivered successfully"
+          else
+            # If we don't get a 200 OK, then no jobs were triggered
+            echo "Something has gone wrong sending the commit notifications to Jenkins"
+            echo "Did you send the right Jenkins token?"
+            echo "Please feel free to re-run the job and let DevOps know something went wrong here"
+            echo "--------------------------------------"
+            echo "$COMMITNOTIFICATION"
+            return 1
+          fi
+
+          ### Identify triggered jobs
+          jobs_triggered=$(echo "$COMMITNOTIFICATION" | grep -E 'Triggered' | cut -d " " -f 2 || true)
+          number_of_jobs_triggered=$(echo "$jobs_triggered" | awk NF | wc -l | sed 's/^ *//g' || true)
+
+          # If no jobs triggered, notify
+          if [[ "$(echo "$number_of_jobs_triggered" | grep "^0$")" ]]; then
+            # No jobs triggered
+            :
+          else
+            # If we trigger any jobs, return them
+            ALL_JOBS_TRIGGERED="${ALL_JOBS_TRIGGERED}"$'\n'"${jobs_triggered}"
+          fi
+
+        }
+
+
+        ###
+        ### Print what's happening
+        ###
+        echo "--------------------------------------"
+        echo "Summoning that slumbering beast, Jenkins, from Azathoth"
+        echo "Sending commit notifications"
+        echo "Jenkins server: $urlOfJenkinsServer"
+        echo "GitHub repository: $GITHUB_REPOSITORY"
+
+        
+        ###
+        ### Send commit notification, gather jobs triggered
+        ###
+        sendCommitNotification \
+          GITHUB_REPOSITORY=$GITHUB_REPOSITORY
+          LOWERCASE=false
+
+        
+        ###
+        ### Send lower-cased commit notification, gather jobs triggered
+        ###
+        GITHUB_REPOSITORY_LOWERCASE=$(echo $GITHUB_REPOSITORY | tr '[A-Z]' '[a-z]')
+        sendCommitNotification \
+          GITHUB_REPOSITORY=$GITHUB_REPOSITORY_LOWERCASE \
+          LOWERCASE=true
+
+        
+        ###
+        ### Gather jobs triggered (if any) and count them
+        ###
+        ALL_JOBS_TRIGGERED="$(echo "$ALL_JOBS_TRIGGERED" | awk 'NF' | sort -f | uniq || true)"
+        ALL_JOBS_TRIGGERED_COUNT=$(echo "$ALL_JOBS_TRIGGERED" | awk NF | wc -l | sed 's/^ *//g' || true)
+
+
+        ###
+        ### If no jobs triggered, notify but exit success
+        ###
+        if [[ "$(echo $ALL_JOBS_TRIGGERED_COUNT | grep "^0$")" ]]; then
+          echo "--------------------------------------"
+          echo "However, no jobs were triggered"
+          echo "This likely isn't an error, but means no Jenkins jobs monitor this code path"
+          echo "Check your Jenkins job config!"
+          echo "--------------------------------------"
+          exit 0
+        else
+          echo "--------------------------------------"
+          echo "We triggered $ALL_JOBS_TRIGGERED_COUNT job(s)!"
+          while IFS=$'\n' read -r TRIGGERED_JOB; do
+            echo "- $TRIGGERED_JOB"
+          done <<< "$ALL_JOBS_TRIGGERED"
+          echo '--------------------------------------'
+          exit 0
+        fi
+
+      shell: bash
+branding:
+  icon: 'arrow-down-circle'
+  color: 'gray-dark'
